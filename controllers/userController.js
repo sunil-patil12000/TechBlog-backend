@@ -1,22 +1,54 @@
 const asyncHandler = require('express-async-handler');
-const User = require('../models/userModel'); // Fixed import path
+const User = require('../models/user');
 const ErrorResponse = require('../utils/errorResponse');
-const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 
 // @desc    Register user
 // @route   POST /api/users/register
 // @access  Public
 exports.registerUser = asyncHandler(async (req, res, next) => {
-  const { name, email, password } = req.body;
+  try {
+    // Check if MongoDB is connected
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Database connection error. Please try again later.'
+      });
+    }
 
-  // Create user
-  const user = await User.create({
-    name,
-    email,
-    password
-  });
+    const { name, email, password, role } = req.body;
 
-  sendTokenResponse(user, 201, res);
+    // Create user - the password will be hashed in the user model
+    const user = await User.create({
+      name,
+      email,
+      password,
+      role: role === 'admin' ? 'user' : role // prevent self-assignment as admin
+    });
+
+    // Send token response
+    const token = user.getSignedJwtToken();
+
+    res.status(201).json({
+      success: true,
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role
+      }
+    });
+  } catch (error) {
+    console.error('Registration error:', error);
+    
+    // Check for duplicate key error (email already exists)
+    if (error.code === 11000) {
+      return next(new ErrorResponse('Email already in use', 400));
+    }
+    
+    next(error);
+  }
 });
 
 // @desc    Login user
@@ -97,10 +129,21 @@ exports.updatePassword = asyncHandler(async (req, res, next) => {
 });
 
 // @desc    Delete user
-// @route   DELETE /api/users
-// @access  Private
+// @route   DELETE /api/users/:id
+// @access  Private/Admin
 exports.deleteUser = asyncHandler(async (req, res, next) => {
-  await User.findByIdAndDelete(req.user.id);
+  const user = await User.findById(req.params.id);
+
+  if (!user) {
+    return next(new ErrorResponse(`User not found with id of ${req.params.id}`, 404));
+  }
+
+  // Don't allow users to delete themselves
+  if (user._id.toString() === req.user.id) {
+    return next(new ErrorResponse(`Cannot delete your own account`, 400));
+  }
+
+  await User.deleteOne({ _id: req.params.id });
 
   res.status(200).json({
     success: true,
@@ -109,49 +152,40 @@ exports.deleteUser = asyncHandler(async (req, res, next) => {
 });
 
 // @desc    Update user profile
-// @route   PUT /api/users/updateprofile
+// @route   PUT /api/users/me
 // @access  Private
-exports.updateProfile = async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
+exports.updateProfile = asyncHandler(async (req, res, next) => {
+  // Fields to update
+  const fieldsToUpdate = {
+    name: req.body.name,
+    email: req.body.email
+  };
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    const updates = {
-      name: req.body.name || user.name,
-      email: req.body.email || user.email
-    };
-
-    const updatedUser = await User.findByIdAndUpdate(
-      req.user.id,
-      updates,
-      { new: true, runValidators: true }
-    );
-
-    res.status(200).json({
-      success: true,
-      data: updatedUser
-    });
-  } catch (error) {
-    res.status(400).json({
-      success: false,
-      message: error.message
-    });
+  // Only update password if it's provided
+  if (req.body.password) {
+    fieldsToUpdate.password = req.body.password;
   }
-};
+
+  const user = await User.findByIdAndUpdate(req.user.id, fieldsToUpdate, {
+    new: true,
+    runValidators: true
+  });
+
+  res.status(200).json({
+    success: true,
+    data: user
+  });
+});
 
 // @desc    Get all users
 // @route   GET /api/users
 // @access  Private/Admin
-exports.getUsers = asyncHandler(async (req, res) => {
-  const users = await User.find().select('-password');
+exports.getUsers = asyncHandler(async (req, res, next) => {
+  const users = await User.find();
+
   res.status(200).json({
     success: true,
+    count: users.length,
     data: users
   });
 });
@@ -159,11 +193,11 @@ exports.getUsers = asyncHandler(async (req, res) => {
 // @desc    Get single user
 // @route   GET /api/users/:id
 // @access  Private/Admin
-exports.getUserById = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.params.id).select('-password');
-  
+exports.getUserById = asyncHandler(async (req, res, next) => {
+  const user = await User.findById(req.params.id);
+
   if (!user) {
-    throw new ErrorResponse(`User not found with id of ${req.params.id}`, 404);
+    return next(new ErrorResponse(`User not found with id of ${req.params.id}`, 404));
   }
 
   res.status(200).json({
@@ -175,14 +209,14 @@ exports.getUserById = asyncHandler(async (req, res) => {
 // @desc    Update user
 // @route   PUT /api/users/:id
 // @access  Private/Admin
-exports.updateUser = asyncHandler(async (req, res) => {
+exports.updateUser = asyncHandler(async (req, res, next) => {
   const user = await User.findByIdAndUpdate(req.params.id, req.body, {
     new: true,
     runValidators: true
   });
 
   if (!user) {
-    throw new ErrorResponse(`User not found with id of ${req.params.id}`, 404);
+    return next(new ErrorResponse(`User not found with id of ${req.params.id}`, 404));
   }
 
   res.status(200).json({
@@ -196,9 +230,12 @@ const sendTokenResponse = (user, statusCode, res) => {
   // Create token
   const token = user.getSignedJwtToken();
 
+  // Use JWT_COOKIE_EXPIRE if available, otherwise default to 30 days
+  const cookieExpireDays = parseInt(process.env.JWT_COOKIE_EXPIRE || '30', 10);
+  
   const options = {
     expires: new Date(
-      Date.now() + process.env.JWT_COOKIE_EXPIRE * 24 * 60 * 60 * 1000
+      Date.now() + cookieExpireDays * 24 * 60 * 60 * 1000
     ),
     httpOnly: true
   };
@@ -212,6 +249,12 @@ const sendTokenResponse = (user, statusCode, res) => {
     .cookie('token', token, options)
     .json({
       success: true,
-      token
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role
+      }
     });
 };
