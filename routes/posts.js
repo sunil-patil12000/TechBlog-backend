@@ -91,7 +91,7 @@ router.get('/:id', async (req, res, next) => {
         path: 'author',
         select: 'name'
       })
-      .populate('comments');
+      .populate('externalComments');
       
     if (!post) {
       return res.status(404).json({ success: false, message: 'Post not found' });

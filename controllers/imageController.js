@@ -2,6 +2,7 @@ const asyncHandler = require('express-async-handler');
 const Post = require('../models/post');
 const ErrorResponse = require('../utils/errorResponse');
 const upload = require('../utils/fileUpload');
+const imagePathConfig = require('../utils/imagePathConfig');
 
 // @desc    Upload post image
 // @route   PUT /api/v1/posts/:id/image
@@ -27,14 +28,18 @@ exports.uploadPostImage = asyncHandler(async (req, res, next) => {
     return next(new ErrorResponse(`Please upload a file`, 400));
   }
 
+  const imagePath = `/uploads/${req.file.filename}`;
+  const normalizedPath = imagePathConfig.normalizeImagePath(imagePath);
+
   await Post.findByIdAndUpdate(req.params.id, { 
-    featuredImage: `/uploads/${req.file.filename}`,
+    featuredImage: normalizedPath,
     updatedAt: Date.now()
   });
 
   res.status(200).json({
     success: true,
-    data: req.file.filename
+    data: req.file.filename,
+    path: normalizedPath
   });
 });
 
@@ -52,11 +57,15 @@ exports.uploadImage = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, error: 'Please upload a file' });
       }
       
+      const imagePath = `/uploads/${req.file.filename}`;
+      const normalizedPath = imagePathConfig.normalizeImagePath(imagePath);
+      
       res.status(200).json({ 
         success: true, 
         data: { 
           filename: req.file.filename,
-          path: `/uploads/${req.file.filename}`
+          path: normalizedPath,
+          url: normalizedPath
         } 
       });
     });
@@ -68,12 +77,15 @@ exports.uploadImage = asyncHandler(async (req, res) => {
 // @access  Public
 exports.getImage = asyncHandler(async (req, res) => {
   const filename = req.params.filename;
-  // This assumes your images are stored in a public uploads folder
-  // The actual file serving would typically be handled by Express static middleware
+  const imagePath = `/uploads/${filename}`;
+  const normalizedPath = imagePathConfig.normalizeImagePath(imagePath);
+  const exists = imagePathConfig.imageExists(imagePath);
+  
   res.status(200).json({ 
     success: true, 
     data: { 
-      path: `/uploads/${filename}`
+      path: normalizedPath,
+      exists: exists
     } 
   });
 });

@@ -2,20 +2,39 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-// Define absolute upload directory path
+// Define absolute upload directory path - update to match the static serving path
 const uploadDir = path.resolve(__dirname, '../uploads');
 console.log('Upload directory path:', uploadDir);
 
 // Ensure the uploads directory exists with proper permissions
 try {
   if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true, mode: 0o777 });
+    fs.mkdirSync(uploadDir, { recursive: true });
     console.log(`Created uploads directory: ${uploadDir}`);
+    
+    // On Windows, chmod won't work, but the directory should be writable
+    if (process.platform !== 'win32') {
+      fs.chmodSync(uploadDir, 0o777);
+    }
   } else {
     console.log(`Upload directory already exists: ${uploadDir}`);
-    // Make sure directory has proper permissions
-    fs.chmodSync(uploadDir, 0o777);
+    // On Windows, chmod won't work, but log for clarity
+    if (process.platform !== 'win32') {
+      fs.chmodSync(uploadDir, 0o777);
+    }
   }
+  
+  // Verify directory is writable with an actual test
+  const testFile = path.join(uploadDir, 'test-write.txt');
+  try {
+    fs.writeFileSync(testFile, 'Test write permissions');
+    console.log('Upload directory is writable - test successful');
+    fs.unlinkSync(testFile); // Clean up test file
+  } catch (writeErr) {
+    console.error('WARNING: Upload directory is not writable:', writeErr.message);
+    throw new Error(`Upload directory not writable: ${uploadDir}`);
+  }
+  
 } catch (err) {
   console.error('Error with upload directory:', err);
 }
@@ -55,7 +74,7 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-// Enhance the file upload logging
+// Enhance the file upload logging and handling
 const upload = multer({
   storage: storage,
   fileFilter: (req, file, cb) => {

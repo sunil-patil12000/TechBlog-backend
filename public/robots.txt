@@ -1,0 +1,29 @@
+# Tech Blog - robots.txt
+# Version 1.0
+
+# Allow all web crawlers
+User-agent: *
+Allow: /
+
+# Restrict certain areas
+Disallow: /admin/
+Disallow: /api/
+Disallow: /login
+Disallow: /register
+Disallow: /profile
+Disallow: /settings
+
+# Block specific bad bots
+User-agent: MJ12bot
+Disallow: /
+User-agent: AhrefsBot
+Disallow: /
+User-agent: BLEXBot
+Disallow: /
+
+# Sitemap location
+Sitemap: https://yourdomain.com/sitemap.xml
+
+# Crawl delay for heavy crawlers
+User-agent: Baiduspider
+Crawl-delay: 10 

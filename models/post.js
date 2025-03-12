@@ -25,7 +25,7 @@ const PostSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Please add a title'],
       trim: true,
-      maxlength: [200, 'Title cannot be more than 200 characters'],
+      maxlength: [100, 'Title cannot be more than 100 characters'],
     },
     slug: {
       type: String,
@@ -35,23 +35,49 @@ const PostSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Please add content'],
     },
-    excerpt: {
+    summary: {
       type: String,
-      maxlength: [500, 'Excerpt cannot be more than 500 characters'],
+      maxlength: [200, 'Summary cannot be more than 200 characters'],
     },
-    category: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Category',
-    },
-    tags: [String],
-    published: {
+    featured: {
       type: Boolean,
       default: false,
     },
+    published: {
+      type: Boolean,
+      default: true,
+    },
+    publishDate: {
+      type: Date,
+      default: Date.now,
+    },
+    views: {
+      type: Number,
+      default: 0,
+    },
+    category: {
+      type: String,
+      required: [true, 'Please add a category'],
+      enum: ['Technology', 'Health', 'Finance', 'Lifestyle', 'Education', 'Travel', 'Food', 'News', 'Entertainment', 'Sports', 'Business', 'Science', 'Other'],
+    },
+    tags: {
+      type: [String],
+    },
     author: {
-      type: mongoose.Schema.Types.ObjectId,
+      type: mongoose.Schema.ObjectId,
       ref: 'User',
       required: true,
+    },
+    coverImage: {
+      type: String,
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now,
+    },
+    updatedAt: {
+      type: Date,
+      default: Date.now,
     },
     comments: [CommentSchema],
     images: [
@@ -84,29 +110,28 @@ const PostSchema = new mongoose.Schema(
 
 // Create a slug from the title before save
 PostSchema.pre('save', function (next) {
-  if (this.isNew || this.isModified('title')) {
+  if (this.isModified('title')) {
     this.slug = slugify(this.title, {
       lower: true,
       strict: true,
     });
-    
-    // Add random string to ensure uniqueness
-    if (this.isNew) {
-      this.slug += '-' + Math.floor(Math.random() * 1000).toString();
-    }
+  }
+  
+  if (this.isModified('content')) {
+    this.updatedAt = Date.now();
   }
 
   // Generate excerpt from content if not provided
-  if (!this.excerpt && this.content) {
-    // Remove html tags and limit to 300 chars
-    this.excerpt = this.content
+  if (!this.summary && this.content) {
+    // Remove html tags and limit to 200 chars
+    this.summary = this.content
       .replace(/<\/?[^>]+(>|$)/g, '') // Remove HTML tags
-      .substring(0, 300)
+      .substring(0, 200)
       .trim();
       
     // Add ellipsis if content was truncated
-    if (this.content.length > 300) {
-      this.excerpt += '...';
+    if (this.content.length > 200) {
+      this.summary += '...';
     }
   }
 
@@ -171,5 +196,16 @@ PostSchema.post('save', function(doc) {
     console.log('Post saved without thumbnail');
   }
 });
+
+// Virtual field for comments
+PostSchema.virtual('externalComments', {
+  ref: 'Comment',
+  localField: '_id',
+  foreignField: 'post',
+  justOne: false
+});
+
+// Index for faster search
+PostSchema.index({ title: 'text', content: 'text', tags: 'text' });
 
 module.exports = mongoose.model('Post', PostSchema);

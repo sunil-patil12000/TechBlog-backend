@@ -1,6 +1,9 @@
 const asyncHandler = require('express-async-handler');
 const Post = require('../models/post');
 const ErrorResponse = require('../utils/errorResponse');
+const imagePathConfig = require('../utils/imagePathConfig');
+const path = require('path');
+const fs = require('fs');
 
 // @desc    Get all posts
 // @route   GET /api/posts
@@ -22,14 +25,30 @@ exports.getPosts = asyncHandler(async (req, res) => {
     ];
   }
 
-  // Only show published posts unless admin/author is requesting
-  if (!req.user || req.user.role !== 'admin') {
+  // Published filter - allow admins to see unpublished posts
+  if (req.query.published === 'false' && req.user?.role === 'admin') {
+    filter.published = false;
+  } else if (req.query.published === 'true') {
+    filter.published = true;
+  } else if (!req.user || req.user.role !== 'admin') {
+    // Non-admins can only see published posts
     filter.published = true;
   }
+  
+  // Filter by publish date
+  if (req.query.hasPublishDate === 'true') {
+    filter.publishDate = { $exists: true, $ne: null };
+  }
+  
+  // Sort options
+  const sortField = req.query.sort || 'createdAt';
+  const sortOrder = req.query.order === 'asc' ? 1 : -1;
+  const sortOptions = {};
+  sortOptions[sortField] = sortOrder;
 
   const posts = await Post.find(filter)
     .populate('author', 'name avatar')
-    .sort({ createdAt: -1 })
+    .sort(sortOptions)
     .skip(startIndex)
     .limit(limit);
 
@@ -75,19 +94,29 @@ exports.getPostById = asyncHandler(async (req, res) => {
 // @access  Public
 exports.getPostBySlug = asyncHandler(async (req, res) => {
   const post = await Post.findOne({ slug: req.params.slug })
-    .populate('author', 'name avatar')
-    .populate('comments.author', 'name avatar');
-
+    .populate('author', 'name avatar bio')
+    .populate({
+      path: 'comments',
+      populate: {
+        path: 'user',
+        select: 'name avatar'
+      }
+    });
+    
   if (!post) {
-    return res.status(404).json({
+    return res.status(404).json({ 
       success: false,
-      message: `Post not found with slug of ${req.params.slug}`
+      message: 'Post not found' 
     });
   }
-
-  res.status(200).json({
-    success: true,
-    data: post
+  
+  // Increment the views count
+  post.views = (post.views || 0) + 1;
+  await post.save();
+  
+  res.status(200).json({ 
+    success: true, 
+    data: post 
   });
 });
 
@@ -118,22 +147,44 @@ exports.createPost = asyncHandler(async (req, res) => {
   }
 
   // Process uploaded images with better error handling
+  let formUploadedImages = [];
+  let contentImages = [];
   let images = [];
   try {
+    // First, process images uploaded directly with the form
     if (req.files && req.files.length > 0) {
-      images = req.files.map(file => {
-        console.log('Processing file:', file.filename);
+      console.log('Processing form-uploaded files:', req.files.length);
+      req.files.forEach(file => {
+        console.log(`File details: ${file.filename}, path: ${file.path}`);
+      });
+      
+      formUploadedImages = req.files.map(file => {
+        const imagePath = `/uploads/${file.filename}`;
+        console.log(`Processing file path: ${imagePath}`);
+        
+        // Test file exists physically using our enhanced utility
+        const { exists, path: foundPath } = imagePathConfig.imageExists(imagePath);
+        if (exists) {
+          console.log(`File exists at: ${foundPath}`);
+        } else {
+          console.error(`WARNING: File does not exist: ${imagePath}`);
+        }
+        
+        const normalizedPath = imagePathConfig.normalizeImagePath(imagePath);
+        console.log(`Normalized path: ${normalizedPath}`);
+        
         return {
-          url: `/uploads/${file.filename}`,
-          alt: req.body.title || 'Blog post image'
+          url: normalizedPath,
+          alt: req.body.title || 'Blog post image',
+          originalFilename: file.filename
         };
       });
-      console.log('Processed uploaded images:', images.length);
+      console.log('Processed uploaded images:', JSON.stringify(formUploadedImages));
     } else {
       console.log('No images uploaded directly with the request');
     }
 
-    // NEW: Extract images from TinyMCE content
+    // Then, extract images from TinyMCE content
     const content = req.body.content || '';
     const contentImageMatches = content.match(/<img[^>]+src="([^">]+)"/g) || [];
     console.log(`Found ${contentImageMatches.length} images in content`);
@@ -144,34 +195,44 @@ exports.createPost = asyncHandler(async (req, res) => {
         // Extract src attribute
         let imgSrc = srcMatch[1];
         
-        // Normalize the path - handle both relative and absolute paths
-        if (imgSrc.startsWith('../uploads/') || imgSrc.startsWith('../../uploads/')) {
-          imgSrc = imgSrc.replace(/(\.\.\/)+uploads\//, '/uploads/');
-        } else if (imgSrc.startsWith('/api/uploads/')) {
-          imgSrc = imgSrc.replace('/api/uploads/', '/uploads/');
-        } else if (!imgSrc.startsWith('/uploads/')) {
-          // Skip external images or non-upload paths
+        // Use our enhanced utility to normalize the path
+        let normalizedSrc = imagePathConfig.normalizeImagePath(imgSrc);
+        if (!normalizedSrc) {
+          console.warn(`Skipping image with invalid src: ${imgSrc}`);
           continue;
         }
         
-        console.log('Found image in content:', imgSrc);
+        console.log('Found image in content:', normalizedSrc);
+        
+        // Check if the image actually exists
+        const { exists, path: foundPath } = imagePathConfig.imageExists(normalizedSrc);
+        if (!exists) {
+          console.warn(`Warning: Content image may not exist: ${normalizedSrc}`);
+        } else {
+          console.log(`Content image exists at: ${foundPath}`);
+        }
         
         // Extract alt if available
         const altMatch = imgTag.match(/alt="([^">]*)"/);
         const imgAlt = altMatch ? altMatch[1] : req.body.title || 'Blog post image';
         
-        // Only add if this image isn't already in the images array
-        const imageExists = images.some(img => img.url === imgSrc);
+        // Only add if this image isn't already in the form-uploaded images array
+        const imageExists = formUploadedImages.some(img => img.url === normalizedSrc) || 
+                          contentImages.some(img => img.url === normalizedSrc);
         if (!imageExists) {
-          images.push({
-            url: imgSrc,
+          contentImages.push({
+            url: normalizedSrc,
             alt: imgAlt
           });
-          console.log('Added content image to images array:', imgSrc);
+          console.log('Added content image to contentImages array:', normalizedSrc);
+        } else {
+          console.log('Skipping duplicate image:', normalizedSrc);
         }
       }
     }
 
+    // Combine both image arrays, with form-uploaded images first
+    images = [...formUploadedImages, ...contentImages];
     console.log(`Final processed images count: ${images.length}`);
   } catch (error) {
     console.error('Error processing images:', error);
@@ -180,26 +241,45 @@ exports.createPost = asyncHandler(async (req, res) => {
   // Handle thumbnail selection with proper object creation
   let thumbnail = null;
   try {
-    if (images.length > 0) {
+    if (formUploadedImages.length > 0) {
       const thumbnailIndexStr = req.body.thumbnailIndex;
+      console.log('thumbnailIndex (raw):', thumbnailIndexStr, typeof thumbnailIndexStr);
+      
       const thumbnailIndex = parseInt(thumbnailIndexStr);
+      console.log('thumbnailIndex (parsed):', thumbnailIndex, typeof thumbnailIndex);
       
-      console.log('Raw thumbnailIndex value:', thumbnailIndexStr);
-      console.log('Parsed thumbnailIndex:', thumbnailIndex, 'Type:', typeof thumbnailIndex);
-      
-      if (!isNaN(thumbnailIndex) && thumbnailIndex >= 0 && thumbnailIndex < images.length) {
+      if (!isNaN(thumbnailIndex) && thumbnailIndex >= 0 && thumbnailIndex < formUploadedImages.length) {
+        // Use the thumbnail index to select from form-uploaded images
         thumbnail = {
-          url: images[thumbnailIndex].url,
-          alt: images[thumbnailIndex].alt
+          url: formUploadedImages[thumbnailIndex].url,
+          alt: formUploadedImages[thumbnailIndex].alt,
+          originalFilename: formUploadedImages[thumbnailIndex].originalFilename
         };
-        console.log('Selected thumbnail from index', thumbnailIndex, ':', JSON.stringify(thumbnail));
-      } else if (images.length > 0) {
+        console.log('Selected thumbnail by index:', JSON.stringify(thumbnail));
+        
+        // Verify thumbnail image exists
+        const { exists, path: foundPath } = imagePathConfig.imageExists(thumbnail.url);
+        if (!exists) {
+          console.warn(`Warning: Selected thumbnail may not exist: ${thumbnail.url}`);
+        } else {
+          console.log(`Thumbnail exists at: ${foundPath}`);
+        }
+      } else if (formUploadedImages.length > 0) {
+        // Fallback to first form-uploaded image
         thumbnail = {
-          url: images[0].url,
-          alt: images[0].alt
+          url: formUploadedImages[0].url,
+          alt: formUploadedImages[0].alt,
+          originalFilename: formUploadedImages[0].originalFilename
         };
-        console.log('Using first image as thumbnail:', JSON.stringify(thumbnail));
+        console.log('Using first image as thumbnail (fallback):', JSON.stringify(thumbnail));
       }
+    } else if (contentImages && contentImages.length > 0) {
+      // If no form-uploaded images, use the first content image
+      thumbnail = {
+        url: contentImages[0].url,
+        alt: contentImages[0].alt
+      };
+      console.log('Using first content image as thumbnail:', JSON.stringify(thumbnail));
     } else {
       console.log('No images available for thumbnail');
       thumbnail = null;
@@ -246,6 +326,17 @@ exports.createPost = asyncHandler(async (req, res) => {
     const populatedPost = await Post.findById(createdPost._id)
       .populate('author', 'name avatar');
       
+    // Emit socket event to notify about new post
+    if (req.io) {
+      req.io.to('admin-room').emit('new-post', {
+        id: createdPost._id,
+        title: createdPost.title,
+        author: createdPost.author,
+        category: createdPost.category,
+        createdAt: createdPost.createdAt
+      });
+    }
+    
     res.status(201).json({
       success: true,
       message: 'Post created successfully',
@@ -292,10 +383,14 @@ exports.updatePost = asyncHandler(async (req, res) => {
   
   // If new images are uploaded, add them
   if (req.files && req.files.length > 0) {
-    const newImages = req.files.map(file => ({
-      url: `/uploads/${file.filename}`,
-      alt: req.body.title || post.title || 'Blog post image'
-    }));
+    const newImages = req.files.map(file => {
+      const imagePath = `/uploads/${file.filename}`;
+      const normalizedPath = imagePathConfig.normalizeImagePath(imagePath);
+      return {
+        url: normalizedPath,
+        alt: req.body.title || post.title || 'Blog post image'
+      };
+    });
     
     images = [...images, ...newImages];
   }
@@ -312,27 +407,22 @@ exports.updatePost = asyncHandler(async (req, res) => {
         if (srcMatch && srcMatch[1]) {
           let imgSrc = srcMatch[1];
           
-          // Normalize the path
-          if (imgSrc.startsWith('../uploads/') || imgSrc.startsWith('../../uploads/')) {
-            imgSrc = imgSrc.replace(/(\.\.\/)+uploads\//, '/uploads/');
-          } else if (imgSrc.startsWith('/api/uploads/')) {
-            imgSrc = imgSrc.replace('/api/uploads/', '/uploads/');
-          } else if (!imgSrc.startsWith('/uploads/')) {
-            continue;
-          }
+          // Use our utility to normalize the path
+          let normalizedSrc = imagePathConfig.normalizeImagePath(imgSrc);
+          if (!normalizedSrc) continue;
           
           // Extract alt if available
           const altMatch = imgTag.match(/alt="([^">]*)"/);
           const imgAlt = altMatch ? altMatch[1] : req.body.title || post.title || 'Blog post image';
           
           // Only add if image not already present
-          const imageExists = images.some(img => img.url === imgSrc);
+          const imageExists = images.some(img => img.url === normalizedSrc);
           if (!imageExists) {
             images.push({
-              url: imgSrc,
+              url: normalizedSrc,
               alt: imgAlt
             });
-            console.log('Added content image to images array:', imgSrc);
+            console.log('Added content image to images array:', normalizedSrc);
           }
         }
       }
@@ -345,21 +435,52 @@ exports.updatePost = asyncHandler(async (req, res) => {
   updateData.images = images;
   
   // Handle thumbnail selection
-  const thumbnailIndex = parseInt(req.body.thumbnailIndex);
+  const thumbnailIndexStr = req.body.thumbnailIndex;
+  const thumbnailIndex = parseInt(thumbnailIndexStr);
   
-  if (!isNaN(thumbnailIndex) && thumbnailIndex >= 0 && thumbnailIndex < images.length) {
+  console.log('Raw thumbnailIndex value:', thumbnailIndexStr);
+  console.log('Parsed thumbnailIndex:', thumbnailIndex, 'Type:', typeof thumbnailIndex);
+  
+  // Track which images were uploaded with the form vs extracted from content
+  const formUploadedImages = req.files && req.files.length > 0 
+    ? req.files.map(file => ({
+        url: `/uploads/${file.filename}`,
+        alt: req.body.title || post.title || 'Blog post image'
+      }))
+    : [];
+  
+  if (!isNaN(thumbnailIndex) && thumbnailIndex >= 0 && thumbnailIndex < formUploadedImages.length) {
+    // Use the thumbnail index to select from form-uploaded images first
+    updateData.thumbnail = {
+      url: formUploadedImages[thumbnailIndex].url,
+      alt: formUploadedImages[thumbnailIndex].alt
+    };
+    console.log('Updated thumbnail from form-uploaded images:', JSON.stringify(updateData.thumbnail));
+  } else if (!isNaN(thumbnailIndex) && thumbnailIndex >= 0 && thumbnailIndex < images.length) {
+    // Fall back to using the index on the entire images array
     updateData.thumbnail = {
       url: images[thumbnailIndex].url,
       alt: images[thumbnailIndex].alt
     };
-    console.log('Updated thumbnail:', JSON.stringify(updateData.thumbnail));
+    console.log('Updated thumbnail from all images:', JSON.stringify(updateData.thumbnail));
+  } else if (formUploadedImages.length > 0) {
+    // If we have form uploads but no valid index, use the first uploaded image
+    updateData.thumbnail = {
+      url: formUploadedImages[0].url,
+      alt: formUploadedImages[0].alt
+    };
+    console.log('Set default thumbnail to first form-uploaded image:', JSON.stringify(updateData.thumbnail));
   } else if (images.length > 0 && !post.thumbnail) {
     // If no valid thumbnail index but we have images and no existing thumbnail, set first image
     updateData.thumbnail = {
       url: images[0].url,
       alt: images[0].alt
     };
-    console.log('Set default thumbnail to first image:', JSON.stringify(updateData.thumbnail));
+    console.log('Set default thumbnail to first available image:', JSON.stringify(updateData.thumbnail));
+  } else if (!images.length && post.thumbnail) {
+    // If all images were removed, remove the thumbnail too
+    updateData.thumbnail = null;
+    console.log('Removing thumbnail as no images exist');
   }
   
   // Handle tags if provided - with better JSON parsing
@@ -467,19 +588,28 @@ exports.addComment = asyncHandler(async (req, res) => {
   };
 
   // Add to comments array
-  post.comments.unshift(comment);
-  await post.save();
-
-  // Get the new comment with populated author
-  const populatedPost = await Post.findById(req.params.postId)
-    .select('comments')
-    .populate('comments.author', 'name avatar');
+  const updatedPost = await Post.findByIdAndUpdate(
+    req.params.postId,
+    { $push: { comments: comment } },
+    { new: true, runValidators: true }
+  ).populate('author', 'name avatar');
   
-  const newComment = populatedPost.comments[0];
-
-  res.status(201).json({
+  // Emit socket event to notify about new comment
+  if (req.io) {
+    // Emit to admin room for dashboard updates
+    req.io.to('admin-room').emit('new-comment', {
+      id: comment._id,
+      postId: req.params.postId,
+      postTitle: updatedPost.title,
+      user: req.user.name,
+      content: comment.content,
+      createdAt: comment.createdAt
+    });
+  }
+  
+  res.status(200).json({
     success: true,
-    data: newComment
+    data: comment
   });
 });
 
@@ -542,10 +672,14 @@ exports.uploadImage = asyncHandler(async (req, res) => {
     // Log what's being sent back
     console.log('Image uploaded successfully:', req.file.filename);
     
+    // Use our image path utility to normalize the path
+    const imagePath = `/uploads/${req.file.filename}`;
+    const normalizedPath = imagePathConfig.normalizeImagePath(imagePath);
+    
     // Return a properly structured JSON response
     return res.status(200).json({
       success: true,
-      location: `/uploads/${req.file.filename}` // URL path to access the image
+      location: normalizedPath // URL path to access the image
     });
   } catch (error) {
     console.error('Error uploading image:', error);
