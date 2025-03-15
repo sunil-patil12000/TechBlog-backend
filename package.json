@@ -2,6 +2,10 @@
   "name": "blog-backend",
   "version": "1.0.0",
   "main": "app.js",
+  "engines": {
+    "bun": "1.x",
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js",
@@ -42,8 +46,7 @@
     "sitemap": "^8.0.0",
     "slugify": "^1.6.6",
     "socket.io": "^4.8.1",
-    "ua-parser-js": "^1.0.37",
-    "zlib": "^1.0.5"
+    "ua-parser-js": "^1.0.37"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
